@@ -4,6 +4,7 @@ import type {
   LLMClient,
   LLMModelId,
   AssistantMessage,
+  StreamChunk,
 } from '../llm/types';
 import type { ToolDefinition } from '../tools/types';
 import type { ToolExecutor } from '../tools/executor';
@@ -84,6 +85,7 @@ function terminateRun(
 
 /**
  * Execute one model call, record the step, and return the assistant message or error.
+ * When llm.chatStream exists and onStreamChunk is provided, streams tokens and calls onStreamChunk for each delta.
  */
 async function executeModelCall(
   state: AgentState,
@@ -95,6 +97,7 @@ async function executeModelCall(
   },
   pushStep: (step: AgentStep) => void,
   now: () => Date,
+  onStreamChunk?: (chunk: StreamChunk) => void,
 ): Promise<{ assistantMessage?: AssistantMessage; error?: string }> {
   const { model, llm, toolDefinitions, config } = params;
   const meta = getNextStepMeta(state);
@@ -107,16 +110,49 @@ async function executeModelCall(
     inputMessages: [...state.messages],
   };
 
+  const chatParams = {
+    model,
+    messages: state.messages,
+    tools: toolDefinitions,
+    toolChoice: 'auto' as const,
+    ...(config.modelCallTimeoutMs !== undefined && {
+      timeoutMs: config.modelCallTimeoutMs,
+    }),
+  } satisfies Parameters<LLMClient['chat']>[0];
+
   try {
-    const chatParams = {
-      model,
-      messages: state.messages,
-      tools: toolDefinitions,
-      toolChoice: 'auto' as const,
-      ...(config.modelCallTimeoutMs !== undefined && {
-        timeoutMs: config.modelCallTimeoutMs,
-      }),
-    } satisfies Parameters<LLMClient['chat']>[0];
+    const useStream =
+      llm.chatStream != null &&
+      onStreamChunk != null;
+
+    if (useStream) {
+      let message: AssistantMessage | undefined;
+      const stream = llm.chatStream!(chatParams);
+      for await (const chunk of stream) {
+        onStreamChunk(chunk);
+        if (chunk.done === true && chunk.message != null) {
+          message = chunk.message;
+          break;
+        }
+      }
+      if (message == null) {
+        modelCallStep.error = 'Stream ended without a final message';
+        modelCallStep.finishedAt = now();
+        pushStep(modelCallStep);
+        return { error: modelCallStep.error };
+      }
+      if (message.role !== 'assistant') {
+        modelCallStep.error = `Expected assistant message, got role "${message.role}"`;
+        modelCallStep.finishedAt = now();
+        pushStep(modelCallStep);
+        return { error: modelCallStep.error };
+      }
+      modelCallStep.outputMessage = message;
+      state.messages.push(message);
+      modelCallStep.finishedAt = now();
+      pushStep(modelCallStep);
+      return { assistantMessage: message };
+    }
 
     const response = await llm.chat(chatParams);
     const { message } = response;
@@ -176,12 +212,19 @@ export async function runAgentLoop(
     for (let i = 0; i < config.maxSteps; i++) {
       const stepIndex = state.steps.length;
 
+      const onStreamChunk = (chunk: StreamChunk) => {
+        for (const o of runObservers) {
+          o.onStreamChunk?.(chunk);
+        }
+      };
+
       // 1) Call the model with the current messages
       const modelResult = await executeModelCall(
         state,
         { model, llm, toolDefinitions, config },
         pushStep,
         now,
+        onStreamChunk,
       );
 
       if (!modelResult.assistantMessage) {

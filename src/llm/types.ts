@@ -120,9 +120,23 @@ export interface ChatCompletionResponse {
 }
 
 /**
+ * One chunk of a streamed chat response.
+ * - contentDelta: incremental text (reasoning or final answer).
+ * - done: when true, the stream is complete and message/usage are the final result.
+ */
+export interface StreamChunk {
+  contentDelta?: string;
+  done?: true;
+  message?: AssistantMessage;
+  usage?: LLMTokenUsage;
+}
+
+/**
  * Provider-agnostic client interface that the rest of the harness depends on.
  * `src/llm/client.ts` will implement this for OpenAI.
+ * Optional chatStream: when present, the runner can stream tokens to the user.
  */
 export interface LLMClient {
   chat(params: ChatCompletionParams): Promise<ChatCompletionResponse>;
+  chatStream?(params: ChatCompletionParams): AsyncIterable<StreamChunk>;
 }

@@ -2,12 +2,22 @@
 
 import type { RunObserver } from './types';
 import type { AgentRunResult } from '../agent/state';
+import type { StreamChunk } from '../llm/types';
 
 /**
  * Observer that prints the run summary and final answer/error to stdout.
- * Same output that was previously inline in index.ts.
+ * When the model streams, prints content deltas so you see the reply (or thinking) as it arrives.
  */
 export class ConsoleRunObserver implements RunObserver {
+  onStreamChunk(chunk: StreamChunk): void {
+    if (chunk.contentDelta) {
+      process.stdout.write(chunk.contentDelta);
+    }
+    if (chunk.done === true) {
+      process.stdout.write('\n');
+    }
+  }
+
   onRunFinished(result: AgentRunResult): void {
     // eslint-disable-next-line no-console
     console.log('=== Agent run summary ===');

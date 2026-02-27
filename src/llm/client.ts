@@ -9,6 +9,8 @@ import type {
   AssistantMessage,
   ToolMessage,
   LLMToolCall,
+  StreamChunk,
+  LLMTokenUsage,
 } from './types';
 import type { ToolDefinition } from '../tools/types';
 
@@ -172,5 +174,95 @@ export class OpenAIClient implements LLMClient {
     };
 
     return result;
+  }
+
+  async *chatStream(params: ChatCompletionParams): AsyncIterable<StreamChunk> {
+    const {
+      model,
+      messages,
+      tools,
+      toolChoice,
+      timeoutMs,
+    } = params;
+
+    const openaiMessages = messages.map(toOpenAIMessage);
+    const openaiTools = toOpenAITools(tools);
+    const openaiToolChoice = toOpenAIToolChoice(toolChoice);
+
+    const stream = await this.client.chat.completions.create(
+      {
+        model,
+        messages: openaiMessages,
+        ...(openaiTools && { tools: openaiTools }),
+        ...(openaiToolChoice !== undefined && { tool_choice: openaiToolChoice }),
+        stream: true,
+        ...(params.temperature !== undefined && { temperature: params.temperature }),
+        ...(params.maxTokens !== undefined && {
+          max_tokens: params.maxTokens ?? null,
+        }),
+        ...(params.topP !== undefined && { top_p: params.topP }),
+        ...(params.stop !== undefined && { stop: params.stop }),
+      },
+      timeoutMs ? { timeout: timeoutMs } : undefined,
+    );
+
+    let content = '';
+    const toolCallsAccum: Array<{ id: string; name: string; arguments: string }> = [];
+    let usage: LLMTokenUsage | undefined;
+
+    for await (const chunk of stream) {
+      const choice = chunk.choices[0];
+      if (!choice?.delta) continue;
+
+      const { delta } = choice;
+
+      if (delta.content != null && delta.content !== '') {
+        content += delta.content;
+        yield { contentDelta: delta.content };
+      }
+
+      if (delta.tool_calls?.length) {
+        for (const tc of delta.tool_calls) {
+          const idx = tc.index ?? 0;
+          if (!toolCallsAccum[idx]) {
+            toolCallsAccum[idx] = { id: tc.id ?? '', name: '', arguments: '' };
+          }
+          if (tc.id != null) toolCallsAccum[idx].id = tc.id;
+          if (tc.function?.name != null) toolCallsAccum[idx].name = tc.function.name;
+          if (tc.function?.arguments != null) {
+            toolCallsAccum[idx].arguments += tc.function.arguments;
+          }
+        }
+      }
+
+      if (choice.finish_reason != null) {
+        const toolCalls: LLMToolCall[] | undefined =
+          toolCallsAccum.length > 0
+            ? toolCallsAccum.map((t) => ({
+                id: t.id,
+                name: t.name,
+                arguments: t.arguments,
+              }))
+            : undefined;
+
+        const message: AssistantMessage = {
+          role: 'assistant',
+          content,
+          toolCalls,
+        };
+
+        yield { done: true, message, ...(usage && { usage }) };
+        return;
+      }
+    }
+
+    const toolCalls: LLMToolCall[] | undefined =
+      toolCallsAccum.length > 0 ? toolCallsAccum : undefined;
+    const message: AssistantMessage = {
+      role: 'assistant',
+      content,
+      toolCalls,
+    };
+    yield { done: true, message, ...(usage && { usage }) };
   }
 }
