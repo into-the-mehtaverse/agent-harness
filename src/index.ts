@@ -2,82 +2,52 @@
 
 import 'dotenv/config';
 
+import { getConfig } from './config';
 import { OpenAIClient } from './llm/client';
-import type { LLMModelId } from './llm/types';
-import { getDefaultTools } from './tools';
+import { generateTaskId } from './utils/id';
+import { getDefaultTools, getToolDefinitions, createDefaultToolExecutor } from './tools';
 import type { AgentTask, AgentConfig } from './agent/state';
 import { runAgentLoop } from './agent/loop';
+import { ConsoleRunObserver } from './observability/consoleObserver';
 
 async function main() {
-  const model: LLMModelId =
-    (process.env.OPENAI_MODEL as LLMModelId) ??
-    (process.env.OPEN_AI_MODEL as LLMModelId) ??
-    'gpt-4.1-mini';
-
-  const apiKey =
-    process.env.OPENAI_API_KEY ?? process.env.OPEN_AI_API_KEY ?? undefined;
-  const baseURL = process.env.OPENAI_BASE_URL ?? undefined;
+  const config = getConfig();
 
   const llm = new OpenAIClient({
-    ...(apiKey && { apiKey }),
-    ...(baseURL && { baseURL }),
+    ...(config.apiKey && { apiKey: config.apiKey }),
+    ...(config.baseURL && { baseURL: config.baseURL }),
   });
 
   const tools = getDefaultTools();
+  const toolExecutor = createDefaultToolExecutor(tools);
+  const toolDefinitions = getToolDefinitions(tools);
 
   const descriptionFromCli = process.argv.slice(2).join(' ');
   const task: AgentTask = {
-    id: `task-${Date.now()}`,
+    id: generateTaskId(),
     description:
-      descriptionFromCli ||
-      'You are a demo agent. Say hello, then (optionally) use tools to show what you can do.',
+      descriptionFromCli || config.defaultTaskDescription,
   };
 
-  const config: AgentConfig = {
-    maxSteps: 8,
-    maxToolCalls: 6,
-    modelCallTimeoutMs: 60_000,
-    toolCallTimeoutMs: 10_000,
-    allowNoToolAnswer: true,
+  const agentConfig: AgentConfig = {
+    ...config.defaultAgentConfig,
     metadata: {
-      model,
+      ...config.defaultAgentConfig.metadata,
+      model: config.model,
     },
-  };
+  } as AgentConfig;
 
-  const result = await runAgentLoop({
+  const runObservers = [new ConsoleRunObserver()];
+
+  await runAgentLoop({
     task,
-    config,
-    model,
+    config: agentConfig,
+    model: config.model,
     llm,
-    tools,
+    toolDefinitions,
+    toolExecutor,
+    runObservers,
   });
-
-  // Simple stdout reporting for now.
-  // We can later plug this into a proper logging / evaluation harness.
-  // eslint-disable-next-line no-console
-  console.log('=== Agent run summary ===');
-  // eslint-disable-next-line no-console
-  console.log('runId:', result.runId);
-  // eslint-disable-next-line no-console
-  console.log('status:', result.status);
-  // eslint-disable-next-line no-console
-  console.log('terminationReason:', result.terminationReason);
-  // eslint-disable-next-line no-console
-  console.log('totalToolCalls:', result.totalToolCalls);
-  // eslint-disable-next-line no-console
-  console.log('steps:', result.steps.length);
-
-  if (result.finalAnswer) {
-    // eslint-disable-next-line no-console
-    console.log('\n=== Final answer ===\n');
-    // eslint-disable-next-line no-console
-    console.log(result.finalAnswer.content);
-  } else if (result.error) {
-    // eslint-disable-next-line no-console
-    console.error('\n=== Error ===\n');
-    // eslint-disable-next-line no-console
-    console.error(result.error);
-  }
 }
 
 main().catch((err) => {

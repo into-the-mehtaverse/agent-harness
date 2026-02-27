@@ -1,6 +1,7 @@
 // src/tools/index.ts
 
 import type { Tool, ToolDefinition, ToolContext, ToolInvocation, ToolResult } from './types';
+import type { ToolExecutor } from './executor';
 import { getBasicTools } from './basicTools';
 
 /**
@@ -9,6 +10,19 @@ import { getBasicTools } from './basicTools';
  */
 export function getDefaultTools(): Tool[] {
   return getBasicTools();
+}
+
+/**
+ * Create the default ToolExecutor that uses the registry and executeToolInvocations.
+ * Later you can wrap this with SandboxedToolExecutor or GuardRailedToolExecutor.
+ */
+export function createDefaultToolExecutor(tools: Tool[]): ToolExecutor {
+  const registry = buildToolRegistry(tools);
+  return {
+    async execute(invocations, ctx) {
+      return executeToolInvocations(invocations, registry, ctx);
+    },
+  };
 }
 
 /**
@@ -107,3 +121,5 @@ export async function executeToolInvocations(
     ),
   );
 }
+
+export type { ToolExecutor } from './executor';

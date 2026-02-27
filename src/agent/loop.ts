@@ -1,12 +1,11 @@
 // src/agent/loop.ts
 
 import type { LLMClient, LLMModelId, AssistantMessage, LLMMessage } from '../llm/types';
-import type { Tool } from '../tools/types';
-import {
-  buildToolRegistry,
-  executeToolInvocations,
-  getToolDefinitions,
-} from '../tools';
+import type { ToolDefinition } from '../tools/types';
+import type { ToolExecutor } from '../tools/executor';
+import { generateRunId } from '../utils/id';
+import { now as nowUtil } from '../utils/time';
+import { createToolLogger } from './utils';
 import {
   type AgentTask,
   type AgentConfig,
@@ -18,15 +17,22 @@ import {
   type ToolResultStep,
   type TerminationStep,
 } from './state';
-import { buildInitialMessages } from './prompts';
+import { createDefaultContextPreparator } from './context';
+import type { ContextPreparator } from './context';
+import type { RunObserver } from '../observability/types';
 
 export interface RunAgentLoopParams {
   task: AgentTask;
   config: AgentConfig;
   model: LLMModelId;
   llm: LLMClient;
-  tools: Tool[];
+  toolDefinitions: ToolDefinition[];
+  toolExecutor: ToolExecutor;
+  contextPreparator?: ContextPreparator;
+  runObservers?: RunObserver[];
 }
+
+const defaultContextPreparator = createDefaultContextPreparator();
 
 /**
  * Create a new AgentState for a run.
@@ -36,11 +42,11 @@ function createInitialState(params: {
   config: AgentConfig;
   system: LLMMessage;
   user: LLMMessage;
-  tools: Tool[];
+  toolDefinitions: ToolDefinition[];
 }): AgentState {
-  const { task, config, system, user, tools } = params;
-  const now = new Date();
-  const runId = `run-${now.getTime()}-${Math.random().toString(36).slice(2, 8)}`;
+  const { task, config, system, user, toolDefinitions } = params;
+  const now = nowUtil();
+  const runId = generateRunId();
 
   return {
     runId,
@@ -50,7 +56,7 @@ function createInitialState(params: {
     messages: [system, user],
     steps: [],
     totalToolCalls: 0,
-    availableTools: tools.map((t) => t.definition.name),
+    availableTools: toolDefinitions.map((t) => t.name),
     createdAt: now,
     updatedAt: now,
   };
@@ -59,22 +65,28 @@ function createInitialState(params: {
 export async function runAgentLoop(
   params: RunAgentLoopParams,
 ): Promise<AgentRunResult> {
-  const { task, config, model, llm, tools } = params;
+  const {
+    task,
+    config,
+    model,
+    llm,
+    toolDefinitions,
+    toolExecutor,
+    contextPreparator = defaultContextPreparator,
+    runObservers = [],
+  } = params;
 
-  const toolDefinitions = getToolDefinitions(tools);
-  const toolRegistry = buildToolRegistry(tools);
-
-  const { system, user } = buildInitialMessages({
+  const { system, user } = contextPreparator.prepare({
     task,
     config,
     tools: toolDefinitions,
   });
 
-  let state = createInitialState({ task, config, system, user, tools });
+  let state = createInitialState({ task, config, system, user, toolDefinitions });
   state.status = 'running';
-  state.updatedAt = new Date();
+  state.updatedAt = nowUtil();
 
-  const now = () => new Date();
+  const now = () => nowUtil();
 
   const pushStep = (step: AgentStep) => {
     state.steps.push(step);
@@ -215,13 +227,10 @@ export async function runAgentLoop(
       pushStep(invocationStep);
 
       // 3) Execute tools
-      const toolResults = await executeToolInvocations(invocations, toolRegistry, {
+      const toolResults = await toolExecutor.execute(invocations, {
         now,
-        env: process.env,
-        log: (message: string, fields?: Record<string, unknown>) => {
-          // eslint-disable-next-line no-console
-          console.log('[tool]', message, fields ?? {});
-        },
+        env: process.env as Record<string, string | undefined>,
+        log: createToolLogger(),
       });
 
       state.totalToolCalls += toolResults.length;
@@ -306,6 +315,10 @@ export async function runAgentLoop(
     createdAt: state.createdAt,
     updatedAt: state.updatedAt,
   };
+
+  for (const observer of runObservers) {
+    await Promise.resolve(observer.onRunFinished(result));
+  }
 
   return result;
 }
