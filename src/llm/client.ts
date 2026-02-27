@@ -51,26 +51,34 @@ function toOpenAIMessage(msg: LLMMessage): OpenAI.Chat.ChatCompletionMessagePara
   } as OpenAI.Chat.ChatCompletionMessageParam;
 }
 
+interface OpenAIFunctionToolCall {
+  id?: string;
+  function?: { name?: string; arguments?: string };
+}
+
 function fromOpenAIAssistantMessage(
   msg: OpenAI.Chat.ChatCompletionMessage,
 ): AssistantMessage {
-  const toolCalls: LLMToolCall[] | undefined = msg.tool_calls
-    ?.map((tc: any) => {
-      if (!tc || !tc.function) return undefined;
+  const rawCalls = msg.tool_calls;
+  const mapped = rawCalls
+    ?.map((tc: OpenAIFunctionToolCall) => {
+      if (!tc?.function) return undefined;
       return {
-        id: tc.id,
-        name: tc.function.name,
-        arguments: tc.function.arguments,
+        id: tc.id ?? '',
+        name: tc.function.name ?? '',
+        arguments: tc.function.arguments ?? '',
       } as LLMToolCall;
     })
-    .filter((tc): tc is LLMToolCall => Boolean(tc));
+    .filter((tc): tc is LLMToolCall => tc != null);
+  const toolCalls: LLMToolCall[] | undefined =
+    mapped && mapped.length > 0 ? mapped : undefined;
 
   const content = typeof msg.content === 'string' ? msg.content : '';
 
   return {
     role: 'assistant',
     content,
-    toolCalls: toolCalls && toolCalls.length > 0 ? toolCalls : undefined,
+    toolCalls,
   };
 }
 
@@ -84,7 +92,7 @@ function toOpenAITools(
     function: {
       name: tool.name,
       description: tool.description ?? '',
-      parameters: tool.parameters as any,
+      parameters: (tool.parameters ?? {}) as Record<string, unknown>,
     },
   }));
 }
@@ -99,6 +107,26 @@ function toOpenAIToolChoice(
   return {
     type: 'function',
     function: { name: toolChoice.name },
+  };
+}
+
+function buildOpenAIChatRequest(
+  params: ChatCompletionParams,
+): OpenAI.Chat.ChatCompletionCreateParamsNonStreaming {
+  const { model, messages, temperature, maxTokens, topP, stop } = params;
+  const openaiMessages = messages.map(toOpenAIMessage);
+  const openaiTools = toOpenAITools(params.tools);
+  const openaiToolChoice = toOpenAIToolChoice(params.toolChoice);
+
+  return {
+    model,
+    messages: openaiMessages,
+    ...(openaiTools && { tools: openaiTools }),
+    ...(openaiToolChoice !== undefined && { tool_choice: openaiToolChoice }),
+    ...(temperature !== undefined && { temperature }),
+    ...(maxTokens !== undefined && { max_tokens: maxTokens ?? null }),
+    ...(topP !== undefined && { top_p: topP }),
+    ...(stop !== undefined && { stop }),
   };
 }
 
@@ -122,33 +150,11 @@ export class OpenAIClient implements LLMClient {
   }
 
   async chat(params: ChatCompletionParams): Promise<ChatCompletionResponse> {
-    const {
-      model,
-      messages,
-      tools,
-      toolChoice,
-      timeoutMs,
-    } = params;
-
-    const openaiMessages = messages.map(toOpenAIMessage);
-    const openaiTools = toOpenAITools(tools);
-    const openaiToolChoice = toOpenAIToolChoice(toolChoice);
+    const { timeoutMs } = params;
+    const body = buildOpenAIChatRequest(params);
 
     const response = await this.client.chat.completions.create(
-      {
-        model,
-        messages: openaiMessages,
-        ...(openaiTools && { tools: openaiTools }),
-        ...(openaiToolChoice !== undefined && { tool_choice: openaiToolChoice }),
-        // Map optional parameters only when defined to satisfy
-        // `exactOptionalPropertyTypes` and OpenAI's `null` semantics.
-        ...(params.temperature !== undefined && { temperature: params.temperature }),
-        ...(params.maxTokens !== undefined && {
-          max_tokens: params.maxTokens ?? null,
-        }),
-        ...(params.topP !== undefined && { top_p: params.topP }),
-        ...(params.stop !== undefined && { stop: params.stop }),
-      },
+      body,
       timeoutMs ? { timeout: timeoutMs } : undefined,
     );
 
@@ -177,32 +183,11 @@ export class OpenAIClient implements LLMClient {
   }
 
   async *chatStream(params: ChatCompletionParams): AsyncIterable<StreamChunk> {
-    const {
-      model,
-      messages,
-      tools,
-      toolChoice,
-      timeoutMs,
-    } = params;
-
-    const openaiMessages = messages.map(toOpenAIMessage);
-    const openaiTools = toOpenAITools(tools);
-    const openaiToolChoice = toOpenAIToolChoice(toolChoice);
+    const { timeoutMs } = params;
+    const body = buildOpenAIChatRequest(params);
 
     const stream = await this.client.chat.completions.create(
-      {
-        model,
-        messages: openaiMessages,
-        ...(openaiTools && { tools: openaiTools }),
-        ...(openaiToolChoice !== undefined && { tool_choice: openaiToolChoice }),
-        stream: true,
-        ...(params.temperature !== undefined && { temperature: params.temperature }),
-        ...(params.maxTokens !== undefined && {
-          max_tokens: params.maxTokens ?? null,
-        }),
-        ...(params.topP !== undefined && { top_p: params.topP }),
-        ...(params.stop !== undefined && { stop: params.stop }),
-      },
+      { ...body, stream: true } as OpenAI.Chat.ChatCompletionCreateParamsStreaming,
       timeoutMs ? { timeout: timeoutMs } : undefined,
     );
 

@@ -27,7 +27,6 @@ export function getConfig(): AppConfig {
     maxSteps: 8,
     maxToolCalls: 6,
     modelCallTimeoutMs: 60_000,
-    toolCallTimeoutMs: 10_000,
     allowNoToolAnswer: true,
   };
 

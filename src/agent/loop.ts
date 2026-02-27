@@ -1,36 +1,17 @@
 // src/agent/loop.ts
 
-import type {
-  LLMClient,
-  LLMModelId,
-  AssistantMessage,
-  StreamChunk,
-} from '../llm/types';
+import type { LLMClient, LLMModelId, AssistantMessage, StreamChunk } from '../llm/types';
 import type { ToolDefinition } from '../tools/types';
 import type { ToolExecutor } from '../tools/executor';
 import { now as nowUtil } from '../utils/time';
 import { toErrorMessage } from '../utils/error';
 import { createToolLogger, toolCallsToInvocations } from './utils';
 import {
-  type AgentTask,
-  type AgentConfig,
-  type AgentState,
-  type AgentRunResult,
-  type AgentStep,
-  type ModelCallStep,
-  type ToolInvocationStep,
-  type ToolResultStep,
-  type TerminationStep,
-  type TerminationReason,
+  type AgentTask, type AgentConfig, type AgentState, type AgentRunResult, type AgentStep,
+  type ModelCallStep, type ToolInvocationStep, type ToolResultStep, type TerminationStep, type TerminationReason,
+  createInitialState, getNextStepMeta, stateToRunResult, appendToolResultMessages,
 } from './state';
-import {
-  createInitialState,
-  getNextStepMeta,
-  stateToRunResult,
-  appendToolResultMessages,
-} from './state';
-import { createDefaultContextPreparator } from './context';
-import type { ContextPreparator } from './context';
+import { createDefaultContextPreparator, type ContextPreparator } from './context';
 import type { RunObserver } from '../observability/types';
 import { notifyRunFinished } from '../observability/notify';
 
@@ -81,6 +62,20 @@ function terminateRun(
   if (options?.error !== undefined) {
     state.error = options.error;
   }
+}
+
+function commitModelCallSuccess(
+  state: AgentState,
+  message: AssistantMessage,
+  modelCallStep: ModelCallStep,
+  pushStep: (step: AgentStep) => void,
+  now: () => Date,
+): { assistantMessage: AssistantMessage } {
+  modelCallStep.outputMessage = message;
+  state.messages.push(message);
+  modelCallStep.finishedAt = now();
+  pushStep(modelCallStep);
+  return { assistantMessage: message };
 }
 
 /**
@@ -147,11 +142,7 @@ async function executeModelCall(
         pushStep(modelCallStep);
         return { error: modelCallStep.error };
       }
-      modelCallStep.outputMessage = message;
-      state.messages.push(message);
-      modelCallStep.finishedAt = now();
-      pushStep(modelCallStep);
-      return { assistantMessage: message };
+      return commitModelCallSuccess(state, message, modelCallStep, pushStep, now);
     }
 
     const response = await llm.chat(chatParams);
@@ -163,12 +154,7 @@ async function executeModelCall(
       pushStep(modelCallStep);
       return { error: modelCallStep.error };
     }
-
-    modelCallStep.outputMessage = message;
-    state.messages.push(message);
-    modelCallStep.finishedAt = now();
-    pushStep(modelCallStep);
-    return { assistantMessage: message };
+    return commitModelCallSuccess(state, message, modelCallStep, pushStep, now);
   } catch (err) {
     modelCallStep.error = toErrorMessage(err, 'Unknown model error');
     modelCallStep.finishedAt = now();
@@ -208,15 +194,15 @@ export async function runAgentLoop(
     state.updatedAt = now();
   };
 
+  const onStreamChunk = (chunk: StreamChunk) => {
+    for (const o of runObservers) {
+      o.onStreamChunk?.(chunk);
+    }
+  };
+
   try {
     for (let i = 0; i < config.maxSteps; i++) {
       const stepIndex = state.steps.length;
-
-      const onStreamChunk = (chunk: StreamChunk) => {
-        for (const o of runObservers) {
-          o.onStreamChunk?.(chunk);
-        }
-      };
 
       // 1) Call the model with the current messages
       const modelResult = await executeModelCall(

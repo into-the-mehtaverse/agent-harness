@@ -108,19 +108,19 @@ export interface BaseAgentStep {
  * Step representing a call to the LLM (model).
  */
 export interface ModelCallStep extends BaseAgentStep {
-    type: 'model_call';
-    /**
-     * The messages sent to the model for this call.
-     */
-    inputMessages: LLMMessage[];
-    /**
-     * The assistant message returned by the model (could include tool calls).
-     */
-    outputMessage?: AssistantMessage;
-    /**
-     * Error if the model call failed.
-     */
-    error?: string;
+  type: 'model_call';
+  /**
+   * The messages sent to the model for this call.
+   */
+  inputMessages: LLMMessage[];
+  /**
+   * The assistant message returned by the model (could include tool calls).
+   */
+  outputMessage?: AssistantMessage;
+  /**
+   * Error if the model call failed.
+   */
+  error?: string;
 }
 
 /**
@@ -305,22 +305,4 @@ export function appendToolResultMessages(
     };
     state.messages.push(toolMessage);
   }
-}
-
-/**
- * Helper type for constructing the initial state.
- */
-export interface AgentInitialStateParams {
-  runId: string;
-  task: AgentTask;
-  config: AgentConfig;
-  /**
-   * System prompt and initial user message that seed the conversation.
-   */
-  systemMessage: SystemMessage;
-  userMessage: UserMessage;
-  /**
-   * Optional list of tool names available for this run.
-   */
-  availableTools?: ToolName[];
 }

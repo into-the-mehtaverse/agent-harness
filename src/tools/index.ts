@@ -1,6 +1,6 @@
 // src/tools/index.ts
 
-import type { Tool, ToolDefinition, ToolContext, ToolInvocation, ToolResult } from './types';
+import type { Tool, ToolDefinition, ToolContext, ToolInvocation, ToolResult, ToolError } from './types';
 import type { ToolExecutor } from './executor';
 import { toErrorMessage } from '../utils/error';
 import { getBasicTools } from './basicTools';
@@ -45,6 +45,23 @@ export function buildToolRegistry(tools: Tool[]): Map<string, Tool> {
   return map;
 }
 
+function makeErrorResult(
+  invocation: ToolInvocation,
+  error: ToolError,
+  startedAt: Date,
+  finishedAt: Date,
+): ToolResult {
+  return {
+    callId: invocation.callId,
+    toolName: invocation.toolName,
+    ok: false,
+    error,
+    startedAt,
+    finishedAt,
+    durationMs: finishedAt.getTime() - startedAt.getTime(),
+  };
+}
+
 /**
  * Execute a single ToolInvocation against a registry of tools,
  * converting thrown errors into structured ToolResult objects.
@@ -58,19 +75,16 @@ export async function executeToolInvocation(
   const tool = registry.get(invocation.toolName);
 
   if (!tool) {
-    return {
-      callId: invocation.callId,
-      toolName: invocation.toolName,
-      ok: false,
-      error: {
+    return makeErrorResult(
+      invocation,
+      {
         type: 'not_found',
         message: `Tool "${invocation.toolName}" is not registered`,
         retryable: false,
       },
       startedAt,
-      finishedAt: ctx.now(),
-      durationMs: ctx.now().getTime() - startedAt.getTime(),
-    };
+      ctx.now(),
+    );
   }
 
   let argsToUse: unknown = invocation.args;
@@ -79,22 +93,17 @@ export async function executeToolInvocation(
     if (!parsed.success) {
       const finishedAt = ctx.now();
       const err = parsed.error;
-      const message = err.message ?? 'Invalid arguments';
-      const details = err.issues?.length ? err.issues : undefined;
-      return {
-        callId: invocation.callId,
-        toolName: invocation.toolName,
-        ok: false,
-        error: {
+      return makeErrorResult(
+        invocation,
+        {
           type: 'validation',
-          message,
+          message: err.message ?? 'Invalid arguments',
           retryable: false,
-          details,
+          details: err.issues?.length ? err.issues : undefined,
         },
         startedAt,
         finishedAt,
-        durationMs: finishedAt.getTime() - startedAt.getTime(),
-      };
+      );
     }
     argsToUse = parsed.data;
   }
@@ -114,22 +123,17 @@ export async function executeToolInvocation(
     };
   } catch (err) {
     const finishedAt = ctx.now();
-    const message = toErrorMessage(err, 'Unknown tool error');
-
-    return {
-      callId: invocation.callId,
-      toolName: invocation.toolName,
-      ok: false,
-      error: {
+    return makeErrorResult(
+      invocation,
+      {
         type: 'execution',
-        message,
+        message: toErrorMessage(err, 'Unknown tool error'),
         retryable: false,
         details: err instanceof Error ? { stack: err.stack } : undefined,
       },
       startedAt,
       finishedAt,
-      durationMs: finishedAt.getTime() - startedAt.getTime(),
-    };
+    );
   }
 }
 

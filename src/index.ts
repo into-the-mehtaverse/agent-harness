@@ -30,12 +30,13 @@ async function main() {
   };
 
   const agentConfig: AgentConfig = {
+    maxSteps: config.defaultAgentConfig.maxSteps ?? 8,
     ...config.defaultAgentConfig,
     metadata: {
       ...config.defaultAgentConfig.metadata,
       model: config.model,
     },
-  } as AgentConfig;
+  };
 
   const runObservers = [new ConsoleRunObserver()];
 
