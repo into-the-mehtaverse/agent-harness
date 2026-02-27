@@ -1,11 +1,15 @@
 // src/agent/loop.ts
 
-import type { LLMClient, LLMModelId, AssistantMessage, LLMMessage } from '../llm/types';
+import type {
+  LLMClient,
+  LLMModelId,
+  AssistantMessage,
+} from '../llm/types';
 import type { ToolDefinition } from '../tools/types';
 import type { ToolExecutor } from '../tools/executor';
-import { generateRunId } from '../utils/id';
 import { now as nowUtil } from '../utils/time';
-import { createToolLogger } from './utils';
+import { toErrorMessage } from '../utils/error';
+import { createToolLogger, toolCallsToInvocations } from './utils';
 import {
   type AgentTask,
   type AgentConfig,
@@ -16,10 +20,18 @@ import {
   type ToolInvocationStep,
   type ToolResultStep,
   type TerminationStep,
+  type TerminationReason,
+} from './state';
+import {
+  createInitialState,
+  getNextStepMeta,
+  stateToRunResult,
+  appendToolResultMessages,
 } from './state';
 import { createDefaultContextPreparator } from './context';
 import type { ContextPreparator } from './context';
 import type { RunObserver } from '../observability/types';
+import { notifyRunFinished } from '../observability/notify';
 
 export interface RunAgentLoopParams {
   task: AgentTask;
@@ -34,32 +46,99 @@ export interface RunAgentLoopParams {
 
 const defaultContextPreparator = createDefaultContextPreparator();
 
-/**
- * Create a new AgentState for a run.
- */
-function createInitialState(params: {
-  task: AgentTask;
-  config: AgentConfig;
-  system: LLMMessage;
-  user: LLMMessage;
-  toolDefinitions: ToolDefinition[];
-}): AgentState {
-  const { task, config, system, user, toolDefinitions } = params;
-  const now = nowUtil();
-  const runId = generateRunId();
+function statusForTerminationReason(reason: TerminationReason): AgentState['status'] {
+  if (reason === 'model_error') return 'failed';
+  if (reason === 'completed') return 'completed';
+  return 'terminated';
+}
 
-  return {
-    runId,
-    task,
-    config,
-    status: 'idle',
-    messages: [system, user],
-    steps: [],
-    totalToolCalls: 0,
-    availableTools: toolDefinitions.map((t) => t.name),
-    createdAt: now,
-    updatedAt: now,
+/**
+ * Create a termination step, push it, update state, and set termination reason.
+ * Call this when the loop should stop; the caller should then break.
+ */
+function terminateRun(
+  state: AgentState,
+  reason: TerminationReason,
+  details: string,
+  options: { error?: string } | undefined,
+  pushStep: (step: AgentStep) => void,
+  now: () => Date,
+): void {
+  const meta = getNextStepMeta(state);
+  const step: TerminationStep = {
+    id: meta.id,
+    index: meta.index,
+    type: 'termination',
+    startedAt: now(),
+    finishedAt: now(),
+    reason,
+    details,
   };
+  pushStep(step);
+  state.status = statusForTerminationReason(reason);
+  state.terminationReason = reason;
+  if (options?.error !== undefined) {
+    state.error = options.error;
+  }
+}
+
+/**
+ * Execute one model call, record the step, and return the assistant message or error.
+ */
+async function executeModelCall(
+  state: AgentState,
+  params: {
+    model: LLMModelId;
+    llm: LLMClient;
+    toolDefinitions: ToolDefinition[];
+    config: AgentConfig;
+  },
+  pushStep: (step: AgentStep) => void,
+  now: () => Date,
+): Promise<{ assistantMessage?: AssistantMessage; error?: string }> {
+  const { model, llm, toolDefinitions, config } = params;
+  const meta = getNextStepMeta(state);
+
+  const modelCallStep: ModelCallStep = {
+    id: meta.id,
+    index: meta.index,
+    type: 'model_call',
+    startedAt: now(),
+    inputMessages: [...state.messages],
+  };
+
+  try {
+    const chatParams = {
+      model,
+      messages: state.messages,
+      tools: toolDefinitions,
+      toolChoice: 'auto' as const,
+      ...(config.modelCallTimeoutMs !== undefined && {
+        timeoutMs: config.modelCallTimeoutMs,
+      }),
+    } satisfies Parameters<LLMClient['chat']>[0];
+
+    const response = await llm.chat(chatParams);
+    const { message } = response;
+
+    if (message.role !== 'assistant') {
+      modelCallStep.error = `Expected assistant message, got role "${message.role}"`;
+      modelCallStep.finishedAt = now();
+      pushStep(modelCallStep);
+      return { error: modelCallStep.error };
+    }
+
+    modelCallStep.outputMessage = message;
+    state.messages.push(message);
+    modelCallStep.finishedAt = now();
+    pushStep(modelCallStep);
+    return { assistantMessage: message };
+  } catch (err) {
+    modelCallStep.error = toErrorMessage(err, 'Unknown model error');
+    modelCallStep.finishedAt = now();
+    pushStep(modelCallStep);
+    return { error: modelCallStep.error };
+  }
 }
 
 export async function runAgentLoop(
@@ -98,127 +177,61 @@ export async function runAgentLoop(
       const stepIndex = state.steps.length;
 
       // 1) Call the model with the current messages
-      const modelCallStep: ModelCallStep = {
-        id: `step-${stepIndex}`,
-        index: stepIndex,
-        type: 'model_call',
-        startedAt: now(),
-        inputMessages: [...state.messages],
-      };
+      const modelResult = await executeModelCall(
+        state,
+        { model, llm, toolDefinitions, config },
+        pushStep,
+        now,
+      );
 
-      let assistantMessage: AssistantMessage | undefined;
-
-      try {
-        const chatParams = {
-          model,
-          messages: state.messages,
-          tools: toolDefinitions,
-          toolChoice: 'auto' as const,
-          ...(config.modelCallTimeoutMs !== undefined && {
-            timeoutMs: config.modelCallTimeoutMs,
-          }),
-        } satisfies Parameters<LLMClient['chat']>[0];
-
-        const response = await llm.chat(chatParams);
-
-        const { message } = response;
-        if (message.role !== 'assistant') {
-          modelCallStep.error = `Expected assistant message, got role "${message.role}"`;
-        } else {
-          assistantMessage = message;
-          modelCallStep.outputMessage = assistantMessage;
-          state.messages.push(assistantMessage);
-        }
-      } catch (err) {
-        const msg =
-          err instanceof Error ? err.message : `Unknown model error: ${String(err)}`;
-        modelCallStep.error = msg;
-      } finally {
-        modelCallStep.finishedAt = now();
-        pushStep(modelCallStep);
-      }
-
-      if (!assistantMessage) {
-        // Model failed; terminate the run.
-        const terminationStep: TerminationStep = {
-          id: `step-${state.steps.length}`,
-          index: state.steps.length,
-          type: 'termination',
-          startedAt: now(),
-          finishedAt: now(),
-          reason: 'model_error',
-          details: 'Model call failed or returned non-assistant message.',
-        };
-        pushStep(terminationStep);
-
-        state.status = 'failed';
-        state.terminationReason = 'model_error';
-        state.error = modelCallStep.error;
+      if (!modelResult.assistantMessage) {
+        terminateRun(
+          state,
+          'model_error',
+          'Model call failed or returned non-assistant message.',
+          modelResult.error !== undefined ? { error: modelResult.error } : undefined,
+          pushStep,
+          now,
+        );
         break;
       }
 
+      const assistantMessage = modelResult.assistantMessage;
       const toolCalls = assistantMessage.toolCalls ?? [];
 
       if (!toolCalls.length) {
-        // No tool calls: treat this as a final answer.
         state.finalAnswer = assistantMessage;
-
-        const terminationStep: TerminationStep = {
-          id: `step-${state.steps.length}`,
-          index: state.steps.length,
-          type: 'termination',
-          startedAt: now(),
-          finishedAt: now(),
-          reason: 'completed',
-          details: 'Assistant returned a final answer without tool calls.',
-        };
-        pushStep(terminationStep);
-
-        state.status = 'completed';
-        state.terminationReason = 'completed';
+        terminateRun(
+          state,
+          'completed',
+          'Assistant returned a final answer without tool calls.',
+          undefined,
+          pushStep,
+          now,
+        );
         break;
       }
 
-      // If we have tool calls, check the maxToolCalls constraint.
       const maxToolCalls = config.maxToolCalls ?? Infinity;
       const projectedTotal = state.totalToolCalls + toolCalls.length;
       if (projectedTotal > maxToolCalls) {
-        const terminationStep: TerminationStep = {
-          id: `step-${state.steps.length}`,
-          index: state.steps.length,
-          type: 'termination',
-          startedAt: now(),
-          finishedAt: now(),
-          reason: 'max_steps_reached',
-          details: `Max tool calls exceeded: ${projectedTotal} > ${maxToolCalls}`,
-        };
-        pushStep(terminationStep);
-
-        state.status = 'terminated';
-        state.terminationReason = 'max_steps_reached';
+        terminateRun(
+          state,
+          'max_steps_reached',
+          `Max tool calls exceeded: ${projectedTotal} > ${maxToolCalls}`,
+          undefined,
+          pushStep,
+          now,
+        );
         break;
       }
 
-      // 2) Convert tool calls into invocations
-      const invocations = toolCalls.map((tc, idx: number) => {
-        let parsedArgs: unknown;
-        try {
-          parsedArgs = tc.arguments ? JSON.parse(tc.arguments) : {};
-        } catch {
-          // If parsing fails, we pass the raw string; the tool will likely error.
-          parsedArgs = { _raw: tc.arguments };
-        }
-
-        return {
-          callId: tc.id || `toolcall-${stepIndex}-${idx}`,
-          toolName: tc.name,
-          args: parsedArgs,
-        };
-      });
-
+      // 2) Convert tool calls into invocations and record step
+      const invocations = toolCallsToInvocations(toolCalls, stepIndex);
+      const invMeta = getNextStepMeta(state);
       const invocationStep: ToolInvocationStep = {
-        id: `step-${state.steps.length}`,
-        index: state.steps.length,
+        id: invMeta.id,
+        index: invMeta.index,
         type: 'tool_invocation',
         startedAt: now(),
         finishedAt: now(),
@@ -235,9 +248,10 @@ export async function runAgentLoop(
 
       state.totalToolCalls += toolResults.length;
 
+      const resMeta = getNextStepMeta(state);
       const resultStep: ToolResultStep = {
-        id: `step-${state.steps.length}`,
-        index: state.steps.length,
+        id: resMeta.id,
+        index: resMeta.index,
         type: 'tool_result',
         startedAt: now(),
         finishedAt: now(),
@@ -246,79 +260,33 @@ export async function runAgentLoop(
       pushStep(resultStep);
 
       // 4) Feed tool results back into the model as tool messages
-      for (const result of toolResults) {
-        const content = result.ok
-          ? JSON.stringify(result.data ?? null)
-          : JSON.stringify(
-              {
-                error: result.error,
-              },
-              null,
-              2,
-            );
+      appendToolResultMessages(state, toolResults);
 
-        const toolMessage: LLMMessage = {
-          role: 'tool',
-          content,
-          toolCallId: result.callId,
-        };
-        state.messages.push(toolMessage);
-      }
-
-      // If this was the last allowed step, terminate.
       if (i === config.maxSteps - 1) {
-        const terminationStep: TerminationStep = {
-          id: `step-${state.steps.length}`,
-          index: state.steps.length,
-          type: 'termination',
-          startedAt: now(),
-          finishedAt: now(),
-          reason: 'max_steps_reached',
-          details: 'Reached maxSteps without explicit completion.',
-        };
-        pushStep(terminationStep);
-
-        state.status = 'terminated';
-        state.terminationReason = 'max_steps_reached';
+        terminateRun(
+          state,
+          'max_steps_reached',
+          'Reached maxSteps without explicit completion.',
+          undefined,
+          pushStep,
+          now,
+        );
         break;
       }
     }
   } catch (err) {
-    const message =
-      err instanceof Error ? err.message : `Unknown error: ${String(err)}`;
-    state.status = 'failed';
-    state.terminationReason = 'model_error';
-    state.error = message;
-
-    const terminationStep: TerminationStep = {
-      id: `step-${state.steps.length}`,
-      index: state.steps.length,
-      type: 'termination',
-      startedAt: now(),
-      finishedAt: now(),
-      reason: 'model_error',
-      details: message,
-    };
-    pushStep(terminationStep);
+    const message = toErrorMessage(err);
+    terminateRun(
+      state,
+      'model_error',
+      message,
+      { error: message },
+      pushStep,
+      now,
+    );
   }
 
-  // Build the result view.
-  const result: AgentRunResult = {
-    state,
-    runId: state.runId,
-    status: state.status,
-    terminationReason: state.terminationReason,
-    finalAnswer: state.finalAnswer,
-    error: state.error,
-    steps: state.steps,
-    totalToolCalls: state.totalToolCalls,
-    createdAt: state.createdAt,
-    updatedAt: state.updatedAt,
-  };
-
-  for (const observer of runObservers) {
-    await Promise.resolve(observer.onRunFinished(result));
-  }
-
+  const result = stateToRunResult(state);
+  await notifyRunFinished(runObservers, result);
   return result;
 }

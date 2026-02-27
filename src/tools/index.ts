@@ -2,6 +2,7 @@
 
 import type { Tool, ToolDefinition, ToolContext, ToolInvocation, ToolResult } from './types';
 import type { ToolExecutor } from './executor';
+import { toErrorMessage } from '../utils/error';
 import { getBasicTools } from './basicTools';
 
 /**
@@ -87,8 +88,7 @@ export async function executeToolInvocation(
     };
   } catch (err) {
     const finishedAt = ctx.now();
-    const message =
-      err instanceof Error ? err.message : `Unknown tool error: ${String(err)}`;
+    const message = toErrorMessage(err, 'Unknown tool error');
 
     return {
       callId: invocation.callId,

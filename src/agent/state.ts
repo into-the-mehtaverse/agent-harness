@@ -6,7 +6,14 @@ import type {
   UserMessage,
   AssistantMessage,
 } from '../llm/types';
-import type { ToolInvocation, ToolResult, ToolName } from '../tools/types';
+import type {
+  ToolInvocation,
+  ToolResult,
+  ToolName,
+  ToolDefinition,
+} from '../tools/types';
+import { generateRunId } from '../utils/id';
+import { now as nowUtil } from '../utils/time';
 
 /**
  * High-level status of an agent run.
@@ -217,6 +224,87 @@ export interface AgentRunResult {
   totalToolCalls: number;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/**
+ * Return the next step id and index from current state.
+ * Use when creating any new step so ids and indices stay consistent.
+ */
+export function getNextStepMeta(state: AgentState): { id: string; index: number } {
+  const index = state.steps.length;
+  return { id: `step-${index}`, index };
+}
+
+/**
+ * Create a new AgentState for a run.
+ */
+export function createInitialState(params: {
+  task: AgentTask;
+  config: AgentConfig;
+  system: SystemMessage;
+  user: UserMessage;
+  toolDefinitions: ToolDefinition[];
+}): AgentState {
+  const { task, config, system, user, toolDefinitions } = params;
+  const now = nowUtil();
+  const runId = generateRunId();
+
+  return {
+    runId,
+    task,
+    config,
+    status: 'idle',
+    messages: [system, user],
+    steps: [],
+    totalToolCalls: 0,
+    availableTools: toolDefinitions.map((t) => t.name),
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+/**
+ * Build an AgentRunResult from the current agent state.
+ */
+export function stateToRunResult(state: AgentState): AgentRunResult {
+  return {
+    state,
+    runId: state.runId,
+    status: state.status,
+    terminationReason: state.terminationReason,
+    finalAnswer: state.finalAnswer,
+    error: state.error,
+    steps: state.steps,
+    totalToolCalls: state.totalToolCalls,
+    createdAt: state.createdAt,
+    updatedAt: state.updatedAt,
+  };
+}
+
+/**
+ * Append tool result messages to state.messages so the model can consume them.
+ * Mutates state.messages.
+ */
+export function appendToolResultMessages(
+  state: AgentState,
+  toolResults: ToolResult[],
+): void {
+  for (const result of toolResults) {
+    const content = result.ok
+      ? JSON.stringify(result.data ?? null)
+      : JSON.stringify(
+          { error: result.error },
+          null,
+          2,
+        );
+
+    const toolMessage: LLMMessage = {
+      role: 'tool',
+      content,
+      toolCallId: result.callId,
+    };
+    state.messages.push(toolMessage);
+  }
 }
 
 /**
