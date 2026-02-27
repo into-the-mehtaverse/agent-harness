@@ -1,6 +1,11 @@
 // src/tools/basicTools.ts
 
+import { z } from 'zod';
 import type { Tool, ToolContext } from './types';
+
+const echoArgsSchema = z.object({
+  message: z.string().describe('The message to echo back.'),
+});
 
 /**
  * Simple "echo" tool: returns the same message back.
@@ -21,13 +26,9 @@ export const echoTool: Tool = {
       additionalProperties: false,
     },
   },
+  argsSchema: echoArgsSchema,
   async handler(args: unknown, ctx: ToolContext) {
-    const { message } = (args ?? {}) as { message?: unknown };
-
-    if (typeof message !== 'string') {
-      throw new Error('echo: "message" must be a string');
-    }
-
+    const { message } = args as { message: string };
     ctx.log?.('echo tool invoked', { message });
     return { message };
   },

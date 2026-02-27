@@ -1,5 +1,7 @@
 // src/tools/types.ts
 
+import type { z } from 'zod';
+
 /**
  * Canonical tool name. We keep this as a string alias so we can
  * distinguish it from arbitrary strings in type signatures.
@@ -116,6 +118,12 @@ export type ToolHandler = (
 export interface Tool {
   definition: ToolDefinition;
   handler: ToolHandler;
+  /**
+   * Optional Zod schema for argument validation. When present, args are
+   * validated before the handler runs; validation failures return a
+   * ToolResult with error.type 'validation'.
+   */
+  argsSchema?: z.ZodType;
   /**
    * Optional execution constraints specific to this tool.
    */

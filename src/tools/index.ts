@@ -73,8 +73,34 @@ export async function executeToolInvocation(
     };
   }
 
+  let argsToUse: unknown = invocation.args;
+  if (tool.argsSchema) {
+    const parsed = tool.argsSchema.safeParse(invocation.args);
+    if (!parsed.success) {
+      const finishedAt = ctx.now();
+      const err = parsed.error;
+      const message = err.message ?? 'Invalid arguments';
+      const details = err.issues?.length ? err.issues : undefined;
+      return {
+        callId: invocation.callId,
+        toolName: invocation.toolName,
+        ok: false,
+        error: {
+          type: 'validation',
+          message,
+          retryable: false,
+          details,
+        },
+        startedAt,
+        finishedAt,
+        durationMs: finishedAt.getTime() - startedAt.getTime(),
+      };
+    }
+    argsToUse = parsed.data;
+  }
+
   try {
-    const data = await Promise.resolve(tool.handler(invocation.args, ctx));
+    const data = await Promise.resolve(tool.handler(argsToUse, ctx));
     const finishedAt = ctx.now();
 
     return {
