@@ -113,6 +113,11 @@ async function executeModelCall(
     ...(config.modelCallTimeoutMs !== undefined && {
       timeoutMs: config.modelCallTimeoutMs,
     }),
+    ...(config.reasoning != null && { reasoning: config.reasoning }),
+    ...(state.lastResponseOutput != null &&
+      state.lastResponseOutput.length > 0 && {
+        previousResponseOutput: state.lastResponseOutput,
+      }),
   } satisfies Parameters<LLMClient['chat']>[0];
 
   try {
@@ -122,13 +127,25 @@ async function executeModelCall(
 
     if (useStream) {
       let message: AssistantMessage | undefined;
+      let lastDoneChunk: StreamChunk | undefined;
       const stream = llm.chatStream!(chatParams);
       for await (const chunk of stream) {
         onStreamChunk(chunk);
         if (chunk.done === true && chunk.message != null) {
+          lastDoneChunk = chunk;
           message = chunk.message;
           break;
         }
+      }
+      if (
+        lastDoneChunk?.raw != null &&
+        typeof lastDoneChunk.raw === 'object' &&
+        'output' in lastDoneChunk.raw &&
+        Array.isArray((lastDoneChunk.raw as { output: unknown[] }).output)
+      ) {
+        state.lastResponseOutput = (
+          lastDoneChunk.raw as { output: unknown[] }
+        ).output;
       }
       if (message == null) {
         modelCallStep.error = 'Stream ended without a final message';
@@ -147,6 +164,14 @@ async function executeModelCall(
 
     const response = await llm.chat(chatParams);
     const { message } = response;
+    if (
+      response.raw != null &&
+      typeof response.raw === 'object' &&
+      'output' in response.raw &&
+      Array.isArray((response.raw as { output: unknown[] }).output)
+    ) {
+      state.lastResponseOutput = (response.raw as { output: unknown[] }).output;
+    }
 
     if (message.role !== 'assistant') {
       modelCallStep.error = `Expected assistant message, got role "${message.role}"`;

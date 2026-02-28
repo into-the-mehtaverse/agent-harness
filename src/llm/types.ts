@@ -66,6 +66,23 @@ export type LLMMessage =
  */
 export type LLMModelId = string;
 
+/**
+ * Reasoning effort for models that support it (e.g. Responses API reasoning.effort).
+ * Maps to OpenAI Shared.Reasoning.effort.
+ */
+export type ReasoningEffort =
+  | 'none'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh';
+
+export interface ReasoningConfig {
+  effort?: ReasoningEffort;
+  summary?: 'auto' | 'concise' | 'detailed';
+}
+
 export interface LLMTokenUsage {
   promptTokens: number;
   completionTokens: number;
@@ -93,6 +110,10 @@ export interface ChatCompletionParams {
   topP?: number;
   stop?: string | string[];
   /**
+   * Reasoning config (Responses API / reasoning models). Optional.
+   */
+  reasoning?: ReasoningConfig;
+  /**
    * Optional per-call metadata (e.g. requestId, experiment tags).
    */
   metadata?: Record<string, unknown>;
@@ -100,6 +121,13 @@ export interface ChatCompletionParams {
    * Optional timeout in milliseconds for the provider call.
    */
   timeoutMs?: number;
+  /**
+   * Optional previous response output (Responses API). When doing function calling with
+   * reasoning models, pass the previous response's `output` array here so the next request
+   * includes reasoning items, message, and function_call items. Improves model intelligence
+   * and token efficiency. See OpenAI docs: "Keeping reasoning items in context".
+   */
+  previousResponseOutput?: unknown[];
 }
 
 /**
@@ -126,9 +154,13 @@ export interface ChatCompletionResponse {
  */
 export interface StreamChunk {
   contentDelta?: string;
+  /** When present, reasoning (thinking) text delta; observers may show separately. */
+  reasoningDelta?: string;
   done?: true;
   message?: AssistantMessage;
   usage?: LLMTokenUsage;
+  /** When done, provider-specific raw response (e.g. Response for Responses API). Used to pass back reasoning items in the loop. */
+  raw?: unknown;
 }
 
 /**

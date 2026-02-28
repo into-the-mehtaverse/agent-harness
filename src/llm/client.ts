@@ -1,6 +1,15 @@
 // src/llm/client.ts
 
 import OpenAI from 'openai';
+import type { Reasoning as OpenAIReasoning } from 'openai/resources/shared.js';
+import type {
+  Response,
+  ResponseStreamEvent,
+  ResponseFunctionToolCall,
+  ResponseInputItem,
+  EasyInputMessage,
+  FunctionTool,
+} from 'openai/resources/responses/responses.js';
 import type {
   ChatCompletionParams,
   ChatCompletionResponse,
@@ -11,69 +20,168 @@ import type {
   LLMToolCall,
   StreamChunk,
   LLMTokenUsage,
+  ReasoningConfig,
 } from './types';
 import type { ToolDefinition } from '../tools/types';
 
-function toOpenAIMessage(msg: LLMMessage): OpenAI.Chat.ChatCompletionMessageParam {
-  if (msg.role === 'tool') {
-    const toolMsg = msg as ToolMessage;
-    return {
-      role: 'tool',
-      content: toolMsg.content,
-      tool_call_id: toolMsg.toolCallId,
-    };
+/**
+ * Build instructions and input for the Responses API.
+ * When previousResponseOutput is provided (reasoning models + function calling), we pass
+ * user messages, then the full previous output (reasoning + message + function_calls),
+ * then the new tool results, so the model keeps reasoning context. See OpenAI docs:
+ * "Keeping reasoning items in context".
+ */
+function messagesToInstructionsAndInput(
+  messages: LLMMessage[],
+  previousResponseOutput?: unknown[],
+): { instructions: string | null; input: ResponseInputItem[] } {
+  const systemParts: string[] = [];
+  const userItems: ResponseInputItem[] = [];
+  const toolItems: ResponseInputItem[] = [];
+
+  if (previousResponseOutput != null && previousResponseOutput.length > 0) {
+    const definedMessages = messages.filter(
+      (m): m is LLMMessage => m != null,
+    );
+    for (const msg of definedMessages) {
+      if (msg.role === 'system') {
+        systemParts.push(msg.content);
+      } else if (msg.role === 'user') {
+        const content =
+          typeof (msg as { content: unknown }).content === 'string'
+            ? (msg as { content: string }).content
+            : '';
+        userItems.push({ role: 'user', content } as EasyInputMessage);
+      } else if (msg.role === 'tool') {
+        const toolMsg = msg as ToolMessage;
+        toolItems.push({
+          type: 'function_call_output',
+          call_id: toolMsg.toolCallId,
+          output: toolMsg.content,
+        });
+      }
+    }
+    const instructions =
+      systemParts.length > 0 ? systemParts.join('\n\n') : null;
+    const input: ResponseInputItem[] = [
+      ...userItems,
+      ...(previousResponseOutput as ResponseInputItem[]),
+      ...toolItems,
+    ];
+    return { instructions, input };
   }
 
-  if (msg.role === 'assistant') {
-    const assistant = msg as AssistantMessage;
-    return {
-      role: 'assistant',
-      content: assistant.content,
-      // OpenAI types expect `tool_calls` to be omitted or a non-undefined array.
-      ...(assistant.toolCalls &&
-        assistant.toolCalls.length > 0 && {
-          tool_calls: assistant.toolCalls.map((tc: LLMToolCall) => ({
-            id: tc.id,
-            type: 'function' as const,
-            function: {
-              name: tc.name,
-              arguments: tc.arguments,
-            },
-          })),
-        }),
-    };
+  const input: ResponseInputItem[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg == null) continue;
+    if (msg.role === 'system') {
+      systemParts.push(msg.content);
+      continue;
+    }
+    if (msg.role === 'tool') {
+      const toolMsg = msg as ToolMessage;
+      input.push({
+        type: 'function_call_output',
+        call_id: toolMsg.toolCallId,
+        output: toolMsg.content,
+      });
+      continue;
+    }
+    if (msg.role === 'user') {
+      const content =
+        typeof (msg as { content: unknown }).content === 'string'
+          ? (msg as { content: string }).content
+          : '';
+      input.push({ role: 'user', content } as EasyInputMessage);
+      continue;
+    }
+    if (msg.role === 'assistant') {
+      const assistant = msg as AssistantMessage;
+      const content =
+        typeof assistant.content === 'string' ? assistant.content : '';
+      input.push({ role: 'assistant', content } as EasyInputMessage);
+      if (assistant.toolCalls && assistant.toolCalls.length > 0) {
+        for (const tc of assistant.toolCalls) {
+          input.push({
+            type: 'function_call',
+            call_id: tc.id,
+            name: tc.name,
+            arguments: tc.arguments,
+          });
+        }
+        for (let j = 0; j < assistant.toolCalls.length; j++) {
+          const nextMsg = messages[i + 1 + j];
+          if (nextMsg?.role === 'tool') {
+            const toolMsg = nextMsg as ToolMessage;
+            input.push({
+              type: 'function_call_output',
+              call_id: toolMsg.toolCallId,
+              output: toolMsg.content,
+            });
+          }
+        }
+        i += assistant.toolCalls.length;
+      }
+      continue;
+    }
   }
 
-  // system / user are 1:1
-  return {
-    role: msg.role,
-    content: msg.content,
-  } as OpenAI.Chat.ChatCompletionMessageParam;
+  const instructions =
+    systemParts.length > 0 ? systemParts.join('\n\n') : null;
+  return { instructions, input };
 }
 
-interface OpenAIFunctionToolCall {
-  id?: string;
-  function?: { name?: string; arguments?: string };
+function toResponseTools(
+  tools: ToolDefinition[] | undefined,
+): FunctionTool[] | undefined {
+  if (!tools || tools.length === 0) return undefined;
+
+  return tools.map((tool) => ({
+    type: 'function' as const,
+    name: tool.name,
+    description: tool.description ?? null,
+    parameters: (tool.parameters ?? {}) as Record<string, unknown>,
+    strict: true,
+  }));
 }
 
-function fromOpenAIAssistantMessage(
-  msg: OpenAI.Chat.ChatCompletionMessage,
-): AssistantMessage {
-  const rawCalls = msg.tool_calls;
-  const mapped = rawCalls
-    ?.map((tc: OpenAIFunctionToolCall) => {
-      if (!tc?.function) return undefined;
-      return {
-        id: tc.id ?? '',
-        name: tc.function.name ?? '',
-        arguments: tc.function.arguments ?? '',
-      } as LLMToolCall;
-    })
-    .filter((tc): tc is LLMToolCall => tc != null);
+function toResponseToolChoice(
+  toolChoice: ChatCompletionParams['toolChoice'],
+): 'auto' | 'none' | { type: 'function'; name: string } | undefined {
+  if (!toolChoice) return undefined;
+  if (toolChoice === 'auto' || toolChoice === 'none') return toolChoice;
+  return { type: 'function', name: toolChoice.name };
+}
+
+function toResponseReasoning(
+  reasoning: ReasoningConfig | undefined,
+): OpenAIReasoning | undefined {
+  if (!reasoning) return undefined;
+  const effort =
+    reasoning.effort != null
+      ? (reasoning.effort as OpenAIReasoning['effort'])
+      : undefined;
+  const summary = reasoning.summary ?? undefined;
+  if (effort === undefined && summary === undefined) return undefined;
+  return { ...(effort !== undefined && { effort }), ...(summary !== undefined && { summary }) };
+}
+
+function responseToAssistantMessage(response: Response): AssistantMessage {
+  const content = response.output_text ?? '';
+
+  const toolCallsRaw = (response.output ?? []).filter(
+    (item): item is ResponseFunctionToolCall =>
+      (item as { type?: string }).type === 'function_call',
+  );
   const toolCalls: LLMToolCall[] | undefined =
-    mapped && mapped.length > 0 ? mapped : undefined;
-
-  const content = typeof msg.content === 'string' ? msg.content : '';
+    toolCallsRaw.length > 0
+      ? toolCallsRaw.map((fc) => ({
+          id: fc.call_id ?? fc.id ?? '',
+          name: fc.name ?? '',
+          arguments: fc.arguments ?? '',
+        }))
+      : undefined;
 
   return {
     role: 'assistant',
@@ -82,56 +190,20 @@ function fromOpenAIAssistantMessage(
   };
 }
 
-function toOpenAITools(
-  tools: ToolDefinition[] | undefined,
-): OpenAI.Chat.ChatCompletionTool[] | undefined {
-  if (!tools || tools.length === 0) return undefined;
-
-  return tools.map((tool) => ({
-    type: 'function' as const,
-    function: {
-      name: tool.name,
-      description: tool.description ?? '',
-      parameters: (tool.parameters ?? {}) as Record<string, unknown>,
-    },
-  }));
-}
-
-function toOpenAIToolChoice(
-  toolChoice: ChatCompletionParams['toolChoice'],
-): OpenAI.Chat.ChatCompletionToolChoiceOption | undefined {
-  if (!toolChoice) return undefined;
-  if (toolChoice === 'auto' || toolChoice === 'none') return toolChoice;
-
-  // Force a specific function tool
+function responseUsageToLLMUsage(
+  usage: Response['usage'],
+): LLMTokenUsage | undefined {
+  if (!usage) return undefined;
   return {
-    type: 'function',
-    function: { name: toolChoice.name },
-  };
-}
-
-function buildOpenAIChatRequest(
-  params: ChatCompletionParams,
-): OpenAI.Chat.ChatCompletionCreateParamsNonStreaming {
-  const { model, messages, temperature, maxTokens, topP, stop } = params;
-  const openaiMessages = messages.map(toOpenAIMessage);
-  const openaiTools = toOpenAITools(params.tools);
-  const openaiToolChoice = toOpenAIToolChoice(params.toolChoice);
-
-  return {
-    model,
-    messages: openaiMessages,
-    ...(openaiTools && { tools: openaiTools }),
-    ...(openaiToolChoice !== undefined && { tool_choice: openaiToolChoice }),
-    ...(temperature !== undefined && { temperature }),
-    ...(maxTokens !== undefined && { max_tokens: maxTokens ?? null }),
-    ...(topP !== undefined && { top_p: topP }),
-    ...(stop !== undefined && { stop }),
+    promptTokens: usage.input_tokens ?? 0,
+    completionTokens: usage.output_tokens ?? 0,
+    totalTokens: usage.total_tokens ?? 0,
   };
 }
 
 /**
  * OpenAI-backed implementation of our provider-agnostic LLMClient.
+ * Uses the Responses API (client.responses.create) instead of Chat Completions.
  */
 export class OpenAIClient implements LLMClient {
   private client: OpenAI;
@@ -150,94 +222,148 @@ export class OpenAIClient implements LLMClient {
   }
 
   async chat(params: ChatCompletionParams): Promise<ChatCompletionResponse> {
-    const { timeoutMs } = params;
-    const body = buildOpenAIChatRequest(params);
+    const { model, messages, timeoutMs, reasoning, previousResponseOutput } =
+      params;
+    const { instructions, input } = messagesToInstructionsAndInput(
+      messages,
+      previousResponseOutput,
+    );
+    const tools = toResponseTools(params.tools);
+    const tool_choice = toResponseToolChoice(params.toolChoice);
+    const reasoningParam = toResponseReasoning(reasoning);
 
-    const response = await this.client.chat.completions.create(
+    const body: Parameters<OpenAI['responses']['create']>[0] = {
+      model,
+      ...(instructions != null && { instructions }),
+      ...(input.length > 0 && { input }),
+      ...(tools && tools.length > 0 && { tools }),
+      ...(tool_choice !== undefined && { tool_choice }),
+      ...(params.temperature !== undefined && { temperature: params.temperature }),
+      ...(params.maxTokens !== undefined && {
+        max_output_tokens: params.maxTokens,
+      }),
+      ...(params.topP !== undefined && { top_p: params.topP }),
+      ...(reasoningParam && { reasoning: reasoningParam }),
+    };
+
+    const response = (await this.client.responses.create(
+      body,
+      timeoutMs ? { timeout: timeoutMs } : undefined,
+    )) as Response;
+
+    const message = responseToAssistantMessage(response);
+    const usage = responseUsageToLLMUsage(response.usage);
+
+    return {
+      message,
+      ...(usage && { usage }),
+      raw: response,
+    };
+  }
+
+  async *chatStream(params: ChatCompletionParams): AsyncIterable<StreamChunk> {
+    const { model, messages, timeoutMs, reasoning, previousResponseOutput } =
+      params;
+    const { instructions, input } = messagesToInstructionsAndInput(
+      messages,
+      previousResponseOutput,
+    );
+    const tools = toResponseTools(params.tools);
+    const tool_choice = toResponseToolChoice(params.toolChoice);
+    const reasoningParam = toResponseReasoning(reasoning);
+
+    const body: Parameters<OpenAI['responses']['create']>[0] = {
+      model,
+      stream: true,
+      ...(instructions != null && { instructions }),
+      ...(input.length > 0 && { input }),
+      ...(tools && tools.length > 0 && { tools }),
+      ...(tool_choice !== undefined && { tool_choice }),
+      ...(params.temperature !== undefined && { temperature: params.temperature }),
+      ...(params.maxTokens !== undefined && {
+        max_output_tokens: params.maxTokens,
+      }),
+      ...(params.topP !== undefined && { top_p: params.topP }),
+      ...(reasoningParam && { reasoning: reasoningParam }),
+    };
+
+    const stream = await this.client.responses.create(
       body,
       timeoutMs ? { timeout: timeoutMs } : undefined,
     );
 
-    const choice = response.choices[0];
-    if (!choice || !choice.message) {
-      throw new Error('OpenAIClient: no choices returned from chat.completions.create');
-    }
-
-    const assistantMessage = fromOpenAIAssistantMessage(choice.message);
-
-    const usage =
-      response.usage &&
-      ({
-        promptTokens: response.usage.prompt_tokens ?? 0,
-        completionTokens: response.usage.completion_tokens ?? 0,
-        totalTokens: response.usage.total_tokens ?? 0,
-      } as const);
-
-    const result: ChatCompletionResponse = {
-      message: assistantMessage,
-      ...(usage && { usage }),
-      raw: response,
-    };
-
-    return result;
-  }
-
-  async *chatStream(params: ChatCompletionParams): AsyncIterable<StreamChunk> {
-    const { timeoutMs } = params;
-    const body = buildOpenAIChatRequest(params);
-
-    const stream = await this.client.chat.completions.create(
-      { ...body, stream: true } as OpenAI.Chat.ChatCompletionCreateParamsStreaming,
-      timeoutMs ? { timeout: timeoutMs } : undefined,
-    );
-
     let content = '';
-    const toolCallsAccum: Array<{ id: string; name: string; arguments: string }> = [];
     let usage: LLMTokenUsage | undefined;
+    const toolCallsAccum: Array<{ id: string; name: string; arguments: string }> =
+      [];
 
-    for await (const chunk of stream) {
-      const choice = chunk.choices[0];
-      if (!choice?.delta) continue;
-
-      const { delta } = choice;
-
-      if (delta.content != null && delta.content !== '') {
-        content += delta.content;
-        yield { contentDelta: delta.content };
-      }
-
-      if (delta.tool_calls?.length) {
-        for (const tc of delta.tool_calls) {
-          const idx = tc.index ?? 0;
+    for await (const event of stream as AsyncIterable<ResponseStreamEvent>) {
+      switch (event.type) {
+        case 'response.output_text.delta':
+          if (event.delta) {
+            content += event.delta;
+            yield { contentDelta: event.delta };
+          }
+          break;
+        case 'response.reasoning_text.delta':
+          if (event.delta) {
+            yield { reasoningDelta: event.delta };
+          }
+          break;
+        case 'response.function_call_arguments.delta': {
+          const idx = event.output_index ?? 0;
           if (!toolCallsAccum[idx]) {
-            toolCallsAccum[idx] = { id: tc.id ?? '', name: '', arguments: '' };
+            toolCallsAccum[idx] = {
+              id: event.item_id ?? '',
+              name: '',
+              arguments: '',
+            };
           }
-          if (tc.id != null) toolCallsAccum[idx].id = tc.id;
-          if (tc.function?.name != null) toolCallsAccum[idx].name = tc.function.name;
-          if (tc.function?.arguments != null) {
-            toolCallsAccum[idx].arguments += tc.function.arguments;
-          }
+          if (event.item_id != null) toolCallsAccum[idx].id = event.item_id;
+          if (event.delta) toolCallsAccum[idx].arguments += event.delta;
+          break;
         }
-      }
-
-      if (choice.finish_reason != null) {
-        const toolCalls: LLMToolCall[] | undefined =
-          toolCallsAccum.length > 0
-            ? toolCallsAccum.map((t) => ({
-                id: t.id,
-                name: t.name,
-                arguments: t.arguments,
-              }))
-            : undefined;
-
-        const message: AssistantMessage = {
-          role: 'assistant',
-          content,
-          toolCalls,
-        };
-
-        yield { done: true, message, ...(usage && { usage }) };
-        return;
+        case 'response.function_call_arguments.done': {
+          const idx = event.output_index ?? 0;
+          if (!toolCallsAccum[idx]) {
+            toolCallsAccum[idx] = {
+              id: event.item_id ?? '',
+              name: event.name ?? '',
+              arguments: event.arguments ?? '',
+            };
+          } else {
+            if (event.item_id != null) toolCallsAccum[idx].id = event.item_id;
+            if (event.name != null) toolCallsAccum[idx].name = event.name;
+            if (event.arguments != null)
+              toolCallsAccum[idx].arguments = event.arguments;
+          }
+          break;
+        }
+        case 'response.completed': {
+          const completedEvent = event as {
+            type: 'response.completed';
+            response: Response;
+          };
+          const res = completedEvent.response as Response;
+          usage = responseUsageToLLMUsage(res.usage);
+          const fromRes = responseToAssistantMessage(res);
+          const toolCalls: LLMToolCall[] | undefined =
+            toolCallsAccum.length > 0 ? toolCallsAccum : fromRes.toolCalls;
+          const message: AssistantMessage = {
+            role: 'assistant',
+            content: content || fromRes.content,
+            toolCalls,
+          };
+          yield {
+            done: true,
+            message,
+            ...(usage && { usage }),
+            raw: res,
+          };
+          return;
+        }
+        default:
+          break;
       }
     }
 

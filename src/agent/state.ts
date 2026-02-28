@@ -5,6 +5,7 @@ import type {
   SystemMessage,
   UserMessage,
   AssistantMessage,
+  ReasoningConfig,
 } from '../llm/types';
 import type {
   ToolInvocation,
@@ -64,6 +65,11 @@ export interface AgentConfig {
    * Optional flag to allow the agent to answer without using tools.
    */
   allowNoToolAnswer?: boolean;
+
+  /**
+   * Optional reasoning config (e.g. effort) for models that support it.
+   */
+  reasoning?: ReasoningConfig;
 
   /**
    * Arbitrary experiment / run metadata (e.g. model name, experiment id).
@@ -202,6 +208,12 @@ export interface AgentState {
    * This is a convenience for logging and debugging.
    */
   availableTools?: ToolName[];
+
+  /**
+   * Last response output (Responses API). Passed as previousResponseOutput on the next
+   * model call so reasoning items are kept in context for function-calling turns.
+   */
+  lastResponseOutput?: unknown[];
 
   createdAt: Date;
   updatedAt: Date;
