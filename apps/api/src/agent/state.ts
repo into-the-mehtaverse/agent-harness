@@ -302,6 +302,7 @@ export function appendToolResultMessages(
   toolResults: ToolResult[],
 ): void {
   for (const result of toolResults) {
+    if (result == null) continue;
     const content = result.ok
       ? JSON.stringify(result.data ?? null)
       : JSON.stringify(

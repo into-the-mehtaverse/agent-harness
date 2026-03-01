@@ -347,8 +347,14 @@ export class OpenAIClient implements LLMClient {
           const res = completedEvent.response as Response;
           usage = responseUsageToLLMUsage(res.usage);
           const fromRes = responseToAssistantMessage(res);
+          // Use tool calls from the completed response so call_ids match response.output
+          // (required when sending previousResponseOutput + function_call_output back).
           const toolCalls: LLMToolCall[] | undefined =
-            toolCallsAccum.length > 0 ? toolCallsAccum : fromRes.toolCalls;
+            fromRes.toolCalls?.length
+              ? fromRes.toolCalls
+              : toolCallsAccum.length > 0
+                ? toolCallsAccum
+                : undefined;
           const message: AssistantMessage = {
             role: 'assistant',
             content: content || fromRes.content,

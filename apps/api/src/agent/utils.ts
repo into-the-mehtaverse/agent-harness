@@ -4,6 +4,17 @@ import type { LLMToolCall } from '../llm/types';
 import type { ToolInvocation } from '../tools/types';
 
 /**
+ * Normalize tool name from API (e.g. "functions.get_current_time" → "get_current_time")
+ * so registry lookup matches our tool definitions.
+ */
+function normalizeToolName(name: string): string {
+  if (name.startsWith('functions.')) {
+    return name.slice('functions.'.length);
+  }
+  return name;
+}
+
+/**
  * Convert LLM tool calls (from an assistant message) into ToolInvocation objects.
  * Parses JSON arguments; on parse failure, passes { _raw: arguments } so the tool can error.
  */
@@ -21,7 +32,7 @@ export function toolCallsToInvocations(
 
     return {
       callId: tc.id || `toolcall-${stepIndex}-${idx}`,
-      toolName: tc.name,
+      toolName: normalizeToolName(tc.name || ''),
       args: parsedArgs,
     };
   });
