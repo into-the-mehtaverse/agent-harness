@@ -1,29 +1,13 @@
 {
   "name": "agent-harness",
   "version": "1.0.0",
-  "description": "",
-  "type": "module",
-  "main": "index.js",
-  "scripts": {
-    "start": "tsx src/index.ts",
-    "server": "tsx src/server.ts",
-    "typecheck": "tsc --noEmit",
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "private": true,
+  "description": "Agent harness monorepo",
   "packageManager": "pnpm@10.20.0",
-  "dependencies": {
-    "@hono/node-server": "^1.19.9",
-    "dotenv": "^17.3.1",
-    "hono": "^4.7.11",
-    "openai": "^6.25.0",
-    "zod": "^4.3.6"
-  },
-  "devDependencies": {
-    "@types/node": "^25.3.2",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+  "scripts": {
+    "start": "pnpm --filter api run start",
+    "server": "pnpm --filter api run server",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test"
   }
 }

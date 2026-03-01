@@ -1,0 +1,11 @@
+{
+  "name": "web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Frontend app (placeholder)",
+  "type": "module",
+  "scripts": {
+    "typecheck": "echo \"No typecheck yet\"",
+    "test": "echo \"No tests yet\""
+  }
+}
