@@ -6,6 +6,7 @@
   "main": "index.js",
   "scripts": {
     "start": "tsx src/index.ts",
+    "server": "tsx src/server.ts",
     "typecheck": "tsc --noEmit",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -14,7 +15,9 @@
   "license": "ISC",
   "packageManager": "pnpm@10.20.0",
   "dependencies": {
+    "@hono/node-server": "^1.19.9",
     "dotenv": "^17.3.1",
+    "hono": "^4.7.11",
     "openai": "^6.25.0",
     "zod": "^4.3.6"
   },

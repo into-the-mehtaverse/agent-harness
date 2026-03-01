@@ -55,3 +55,15 @@
 6. **Retries + AbortSignal + timeouts** — production robustness.
 7. **RAG** — retriever + context preparator.
 8. **Sandboxing or human-in-the-loop** — safety and control.
+
+
+I think the path forward might be this, what are your thoughts.
+
+1. Let's turn this into a node / hono backend.
+2. We keep apps within agents/ within src to house the different agents (instead of apps/)
+3. Same design as before, where the agents are instances of the harness.
+4. If we want to go multi-agent, we can add an orchestrator on top of everything down the line.
+5. We'll make this repo so that with one command, a vector db is spun up locally.
+6. For now, we'll make this repo really good for local use. I'll create a simple but powerful frontend interface which lets me choose between the agents I have created and chat with them.
+
+Later, if I want to use  This
