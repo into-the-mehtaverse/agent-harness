@@ -2,10 +2,27 @@
   "name": "web",
   "version": "1.0.0",
   "private": true,
-  "description": "Frontend app (placeholder)",
+  "description": "Frontend app — chat UI & agent builder",
   "type": "module",
   "scripts": {
-    "typecheck": "echo \"No typecheck yet\"",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
     "test": "echo \"No tests yet\""
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.15",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3"
   }
 }

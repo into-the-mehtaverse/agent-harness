@@ -7,6 +7,7 @@
   "scripts": {
     "start": "pnpm --filter api run start",
     "server": "pnpm --filter api run server",
+    "dev:web": "pnpm --filter web run dev",
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test"
   }
