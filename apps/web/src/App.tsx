@@ -12,10 +12,12 @@ export default function App() {
           </h1>
         </header>
 
-        <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-muted/30">
-          <ErrorBoundary>
-            <ChatPage />
-          </ErrorBoundary>
+        <main className="flex min-h-0 flex-1 flex-col bg-muted/30">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <ErrorBoundary>
+              <ChatPage />
+            </ErrorBoundary>
+          </div>
         </main>
       </div>
     </TooltipProvider>
