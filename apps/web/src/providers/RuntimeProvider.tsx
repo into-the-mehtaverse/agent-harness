@@ -84,10 +84,11 @@ async function* parseSSE(
 }
 
 const AgentRunAdapter: ChatModelAdapter = {
-  async run({ messages, abortSignal }) {
+  async *run({ messages, abortSignal }) {
     const description = getLastUserText(messages);
     if (!description) {
-      return { content: [{ type: "text" as const, text: "No message to send." }] };
+      yield { content: [{ type: "text" as const, text: "No message to send." }] };
+      return;
     }
 
     const res = await fetch(`${API_BASE}/run/stream`, {
@@ -99,38 +100,45 @@ const AgentRunAdapter: ChatModelAdapter = {
 
     if (!res.ok) {
       const errorText = (await res.text()) || res.statusText || "Request failed";
-      return {
+      yield {
         content: [{ type: "text" as const, text: `Error: ${errorText}` }],
       };
+      return;
     }
 
     const reader = res.body?.getReader();
     if (!reader) {
-      return {
+      yield {
         content: [{ type: "text" as const, text: "No response body." }],
       };
+      return;
     }
 
-    let lastDone: { event: string; data: unknown } | null = null;
-    let errorMessage: string | null = null;
+    let accumulatedText = "";
 
     for await (const msg of parseSSE(reader, abortSignal)) {
-      if (msg.event === "done") lastDone = msg;
-      if (msg.event === "error") {
+      if (msg.event === "text_delta") {
+        const data = msg.data as { contentDelta?: string };
+        if (data.contentDelta != null && data.contentDelta !== "") {
+          accumulatedText += data.contentDelta;
+          yield { content: [{ type: "text" as const, text: accumulatedText }] };
+        }
+      } else if (msg.event === "error") {
         const data = msg.data as { message?: string };
-        errorMessage = data?.message ?? "Unknown error";
+        yield {
+          content: [{ type: "text" as const, text: `Error: ${data?.message ?? "Unknown error"}` }],
+        };
+        return;
+      } else if (msg.event === "done") {
+        const payload = msg.data as { finalAnswer?: { content?: unknown }; error?: string };
+        const finalText = textFromDonePayload(payload);
+        yield {
+          content: [{ type: "text" as const, text: finalText.length > 0 ? finalText : accumulatedText }],
+          status: { type: "complete" as const, reason: "stop" as const },
+        };
+        return;
       }
     }
-
-    if (errorMessage) {
-      return { content: [{ type: "text" as const, text: `Error: ${errorMessage}` }] };
-    }
-    if (lastDone) {
-      const text = textFromDonePayload(lastDone.data as { finalAnswer?: { content?: unknown }; error?: string });
-      return { content: [{ type: "text" as const, text }] };
-    }
-
-    return { content: [{ type: "text" as const, text: "No response content." }] };
   },
 };
 
