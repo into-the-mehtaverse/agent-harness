@@ -1,6 +1,6 @@
 // src/observability/types.ts
 
-import type { AgentRunResult } from '../agent/state';
+import type { AgentRunResult, AgentStep } from '../agent/state';
 import type { StreamChunk } from '../llm/types';
 
 export interface RunObserver {
@@ -10,4 +10,9 @@ export interface RunObserver {
    * Use this to show "thinking" or reply text as it arrives.
    */
   onStreamChunk?(chunk: StreamChunk): void | Promise<void>;
+  /**
+   * Optional: called for each step pushed in the agent loop (model_call, tool_invocation, tool_result, termination).
+   * Use this to drive SSE or other real-time visibility (e.g. "Calling tool X", "Tool X completed").
+   */
+  onStep?(step: AgentStep): void | Promise<void>;
 }

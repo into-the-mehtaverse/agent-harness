@@ -217,6 +217,9 @@ export async function runAgentLoop(
   const pushStep = (step: AgentStep) => {
     state.steps.push(step);
     state.updatedAt = now();
+    for (const o of runObservers) {
+      o.onStep?.(step);
+    }
   };
 
   const onStreamChunk = (chunk: StreamChunk) => {
