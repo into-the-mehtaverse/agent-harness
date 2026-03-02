@@ -121,13 +121,6 @@ export interface ChatCompletionParams {
    * Optional timeout in milliseconds for the provider call.
    */
   timeoutMs?: number;
-  /**
-   * Optional previous response output (Responses API). When doing function calling with
-   * reasoning models, pass the previous response's `output` array here so the next request
-   * includes reasoning items, message, and function_call items. Improves model intelligence
-   * and token efficiency. See OpenAI docs: "Keeping reasoning items in context".
-   */
-  previousResponseOutput?: unknown[];
 }
 
 /**

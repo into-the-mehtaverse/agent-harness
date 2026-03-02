@@ -25,52 +25,14 @@ import type {
 import type { ToolDefinition } from '../tools/types';
 
 /**
- * Build instructions and input for the Responses API.
- * When previousResponseOutput is provided (reasoning models + function calling), we pass
- * user messages, then the full previous output (reasoning + message + function_calls),
- * then the new tool results, so the model keeps reasoning context. See OpenAI docs:
- * "Keeping reasoning items in context".
+ * Build instructions and input for the Responses API from the full message list.
+ * Always uses the full conversation (user, assistant, tool messages) so the model
+ * has complete history and correct tool call/output pairing (call_ids match).
  */
 function messagesToInstructionsAndInput(
   messages: LLMMessage[],
-  previousResponseOutput?: unknown[],
 ): { instructions: string | null; input: ResponseInputItem[] } {
   const systemParts: string[] = [];
-  const userItems: ResponseInputItem[] = [];
-  const toolItems: ResponseInputItem[] = [];
-
-  if (previousResponseOutput != null && previousResponseOutput.length > 0) {
-    const definedMessages = messages.filter(
-      (m): m is LLMMessage => m != null,
-    );
-    for (const msg of definedMessages) {
-      if (msg.role === 'system') {
-        systemParts.push(msg.content);
-      } else if (msg.role === 'user') {
-        const content =
-          typeof (msg as { content: unknown }).content === 'string'
-            ? (msg as { content: string }).content
-            : '';
-        userItems.push({ role: 'user', content } as EasyInputMessage);
-      } else if (msg.role === 'tool') {
-        const toolMsg = msg as ToolMessage;
-        toolItems.push({
-          type: 'function_call_output',
-          call_id: toolMsg.toolCallId,
-          output: toolMsg.content,
-        });
-      }
-    }
-    const instructions =
-      systemParts.length > 0 ? systemParts.join('\n\n') : null;
-    const input: ResponseInputItem[] = [
-      ...userItems,
-      ...(previousResponseOutput as ResponseInputItem[]),
-      ...toolItems,
-    ];
-    return { instructions, input };
-  }
-
   const input: ResponseInputItem[] = [];
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
@@ -80,12 +42,8 @@ function messagesToInstructionsAndInput(
       continue;
     }
     if (msg.role === 'tool') {
-      const toolMsg = msg as ToolMessage;
-      input.push({
-        type: 'function_call_output',
-        call_id: toolMsg.toolCallId,
-        output: toolMsg.content,
-      });
+      // Only emit tool outputs when paired with an assistant's function_call (done in the assistant block).
+      // Standalone tool messages would cause "No tool call found for function call output" (400).
       continue;
     }
     if (msg.role === 'user') {
@@ -111,14 +69,17 @@ function messagesToInstructionsAndInput(
           });
         }
         for (let j = 0; j < assistant.toolCalls.length; j++) {
+          const tc = assistant.toolCalls[j];
           const nextMsg = messages[i + 1 + j];
           if (nextMsg?.role === 'tool') {
             const toolMsg = nextMsg as ToolMessage;
-            input.push({
-              type: 'function_call_output',
-              call_id: toolMsg.toolCallId,
-              output: toolMsg.content,
-            });
+            if (toolMsg.toolCallId === tc.id) {
+              input.push({
+                type: 'function_call_output',
+                call_id: toolMsg.toolCallId,
+                output: toolMsg.content,
+              });
+            }
           }
         }
         i += assistant.toolCalls.length;
@@ -222,12 +183,8 @@ export class OpenAIClient implements LLMClient {
   }
 
   async chat(params: ChatCompletionParams): Promise<ChatCompletionResponse> {
-    const { model, messages, timeoutMs, reasoning, previousResponseOutput } =
-      params;
-    const { instructions, input } = messagesToInstructionsAndInput(
-      messages,
-      previousResponseOutput,
-    );
+    const { model, messages, timeoutMs, reasoning } = params;
+    const { instructions, input } = messagesToInstructionsAndInput(messages);
     const tools = toResponseTools(params.tools);
     const tool_choice = toResponseToolChoice(params.toolChoice);
     const reasoningParam = toResponseReasoning(reasoning);
@@ -262,12 +219,8 @@ export class OpenAIClient implements LLMClient {
   }
 
   async *chatStream(params: ChatCompletionParams): AsyncIterable<StreamChunk> {
-    const { model, messages, timeoutMs, reasoning, previousResponseOutput } =
-      params;
-    const { instructions, input } = messagesToInstructionsAndInput(
-      messages,
-      previousResponseOutput,
-    );
+    const { model, messages, timeoutMs, reasoning } = params;
+    const { instructions, input } = messagesToInstructionsAndInput(messages);
     const tools = toResponseTools(params.tools);
     const tool_choice = toResponseToolChoice(params.toolChoice);
     const reasoningParam = toResponseReasoning(reasoning);
@@ -347,8 +300,7 @@ export class OpenAIClient implements LLMClient {
           const res = completedEvent.response as Response;
           usage = responseUsageToLLMUsage(res.usage);
           const fromRes = responseToAssistantMessage(res);
-          // Use tool calls from the completed response so call_ids match response.output
-          // (required when sending previousResponseOutput + function_call_output back).
+          // Use tool calls from the completed response so call_ids match response.output.
           const toolCalls: LLMToolCall[] | undefined =
             fromRes.toolCalls?.length
               ? fromRes.toolCalls

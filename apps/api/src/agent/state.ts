@@ -209,12 +209,6 @@ export interface AgentState {
    */
   availableTools?: ToolName[];
 
-  /**
-   * Last response output (Responses API). Passed as previousResponseOutput on the next
-   * model call so reasoning items are kept in context for function-calling turns.
-   */
-  lastResponseOutput?: unknown[];
-
   createdAt: Date;
   updatedAt: Date;
 }
