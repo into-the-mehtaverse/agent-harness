@@ -1,6 +1,6 @@
 // src/routes/runStream.ts
 //
-// POST /run/stream: run the agent loop and stream progress as Server-Sent Events.
+// POST /chat/stream: run the agent loop and stream progress as Server-Sent Events.
 
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
@@ -9,35 +9,56 @@ import type { AgentTask, AgentConfig } from '../agent/state';
 import { runAgentLoop } from '../agent/loop';
 import { createSseRunObserver } from '../streaming/sse';
 import type { AgentDeps } from './types';
+import {
+  type InitialChatMessage,
+  lastUserMessageContent,
+  parseInitialMessages,
+} from './messageContext';
 
-export function createRunStreamRoutes(deps: AgentDeps): Hono {
+export function createChatStreamRoutes(deps: AgentDeps): Hono {
   const app = new Hono();
   const { config, model, llm, toolDefinitions, toolExecutor, runObservers } =
     deps;
 
-  app.post('/run/stream', async (c) => {
-    let body: { description?: string; input?: unknown };
+  app.post('/chat/stream', async (c) => {
+    let body: { messages?: unknown };
     try {
       body = await c.req.json();
     } catch {
       return c.json(
         {
           error:
-            'Invalid JSON body; expected { description?: string, input?: unknown }',
+            'Invalid JSON body; expected { messages: Array<{ role, content }> }',
         },
         400,
       );
     }
 
-    const description =
-      typeof body.description === 'string'
-        ? body.description
-        : config.defaultTaskDescription;
+    let initialMessages: InitialChatMessage[] | undefined;
+    try {
+      initialMessages = parseInitialMessages(body.messages);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Invalid messages payload.';
+      return c.json({ error: message }, 400);
+    }
+    if (!initialMessages || initialMessages.length === 0) {
+      return c.json(
+        { error: '`messages` is required and must include at least one message.' },
+        400,
+      );
+    }
+
+    const descriptionFromMessages = lastUserMessageContent(initialMessages);
+    if (!descriptionFromMessages) {
+      return c.json(
+        { error: '`messages` must include at least one user message.' },
+        400,
+      );
+    }
 
     const task: AgentTask = {
       id: generateTaskId(),
-      description,
-      ...(body.input !== undefined && { input: body.input }),
+      description: descriptionFromMessages,
     };
 
     const agentConfig: AgentConfig = {
@@ -68,6 +89,7 @@ export function createRunStreamRoutes(deps: AgentDeps): Hono {
           toolDefinitions,
           toolExecutor,
           runObservers: [...runObservers, sseObserver],
+          initialMessages,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

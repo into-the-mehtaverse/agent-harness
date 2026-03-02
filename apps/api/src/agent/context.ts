@@ -1,6 +1,6 @@
 // src/agent/context.ts
 
-import type { SystemMessage, UserMessage } from '../llm/types';
+import type { SystemMessage, UserMessage, AssistantMessage } from '../llm/types';
 import type { AgentTask, AgentConfig } from './state';
 import type { ToolDefinition } from '../tools/types';
 import { buildInitialMessages } from './prompts';
@@ -10,7 +10,12 @@ export interface ContextPreparator {
     task: AgentTask;
     config: AgentConfig;
     tools: ToolDefinition[];
-  }): { system: SystemMessage; user: UserMessage };
+    initialMessages?: Array<UserMessage | AssistantMessage>;
+  }): {
+    system: SystemMessage;
+    user: UserMessage;
+    initialMessages?: Array<UserMessage | AssistantMessage>;
+  };
 }
 
 /**
@@ -20,7 +25,14 @@ export interface ContextPreparator {
 export function createDefaultContextPreparator(): ContextPreparator {
   return {
     prepare(params) {
-      return buildInitialMessages(params);
+      const { system, user } = buildInitialMessages(params);
+      return {
+        system,
+        user,
+        ...(params.initialMessages !== undefined && {
+          initialMessages: params.initialMessages,
+        }),
+      };
     },
   };
 }

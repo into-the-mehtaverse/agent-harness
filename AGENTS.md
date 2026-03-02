@@ -8,6 +8,16 @@
 
 ---
 
+## Completed items
+
+- **Structured tool args (Zod)** — Each tool in `tools/factory/` defines an `argsSchema`; the executor validates before running the handler and returns a clear validation error to the model on failure.
+- **Tool factory layout** — Tools live under `tools/factory/` with one file per tool (echo, currentTime, addNumbers); `getBasicTools()` aggregates them.
+- **SSE streaming for runs** — `POST /run/stream` streams events: `thinking`, `text_delta`, `tool_start`, `tool_result`, `step`, `done`, `error`. Agent loop notifies observers via `onStep` and `onStreamChunk`.
+- **Frontend streams reply** — Chat adapter calls `/api/run/stream`, parses SSE, and uses an async generator to yield content so the assistant message streams into the UI as tokens arrive.
+- **Observability hooks** — `RunObserver` supports `onRunFinished`, `onStreamChunk`, and `onStep`; used by the SSE observer and console observer.
+
+---
+
 ## Roadmap: What to Explore & Build
 
 ### 1. Reasoning & planning

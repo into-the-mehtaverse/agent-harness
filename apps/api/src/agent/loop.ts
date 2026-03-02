@@ -1,6 +1,6 @@
 // src/agent/loop.ts
 
-import type { LLMClient, LLMModelId, AssistantMessage, StreamChunk } from '../llm/types';
+import type { LLMClient, LLMModelId, AssistantMessage, StreamChunk, UserMessage } from '../llm/types';
 import type { ToolDefinition } from '../tools/types';
 import type { ToolExecutor } from '../tools/executor';
 import { now as nowUtil } from '../utils/time';
@@ -24,6 +24,7 @@ export interface RunAgentLoopParams {
   toolExecutor: ToolExecutor;
   contextPreparator?: ContextPreparator;
   runObservers?: RunObserver[];
+  initialMessages?: Array<UserMessage | AssistantMessage>;
 }
 
 const defaultContextPreparator = createDefaultContextPreparator();
@@ -200,15 +201,26 @@ export async function runAgentLoop(
     toolExecutor,
     contextPreparator = defaultContextPreparator,
     runObservers = [],
+    initialMessages,
   } = params;
 
-  const { system, user } = contextPreparator.prepare({
+  const { system, user, initialMessages: preparedInitialMessages } = contextPreparator.prepare({
     task,
     config,
     tools: toolDefinitions,
+    ...(initialMessages !== undefined && { initialMessages }),
   });
 
-  let state = createInitialState({ task, config, system, user, toolDefinitions });
+  let state = createInitialState({
+    task,
+    config,
+    system,
+    user,
+    toolDefinitions,
+    ...(preparedInitialMessages !== undefined && {
+      initialMessages: preparedInitialMessages,
+    }),
+  });
   state.status = 'running';
   state.updatedAt = nowUtil();
 

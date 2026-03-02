@@ -9,18 +9,28 @@ import {
 } from "@assistant-ui/react";
 
 const API_BASE = "/api";
+const MAX_CONTEXT_MESSAGES = 24;
 
-function getLastUserText(messages: readonly ThreadMessage[]): string {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m == null || m.role !== "user") continue;
+type ApiChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+function threadMessagesToApiMessages(
+  messages: readonly ThreadMessage[],
+): ApiChatMessage[] {
+  const converted: ApiChatMessage[] = [];
+  for (const m of messages) {
+    if (m == null || (m.role !== "user" && m.role !== "assistant")) continue;
     const text = m.content
       .filter((p): p is { type: "text"; text: string } => p.type === "text")
       .map((p) => p.text)
-      .join("\n");
-    if (text.trim()) return text;
+      .join("\n")
+      .trim();
+    if (!text) continue;
+    converted.push({ role: m.role, content: text });
   }
-  return "";
+  return converted.slice(-MAX_CONTEXT_MESSAGES);
 }
 
 /** Extract display text from done payload finalAnswer.content (array of parts or legacy string). */
@@ -85,16 +95,17 @@ async function* parseSSE(
 
 const AgentRunAdapter: ChatModelAdapter = {
   async *run({ messages, abortSignal }) {
-    const description = getLastUserText(messages);
-    if (!description) {
+    const history = threadMessagesToApiMessages(messages);
+    const hasUserMessage = history.some((m) => m.role === "user");
+    if (!hasUserMessage) {
       yield { content: [{ type: "text" as const, text: "No message to send." }] };
       return;
     }
 
-    const res = await fetch(`${API_BASE}/run/stream`, {
+    const res = await fetch(`${API_BASE}/chat/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ description }),
+      body: JSON.stringify({ messages: history }),
       signal: abortSignal,
     });
 

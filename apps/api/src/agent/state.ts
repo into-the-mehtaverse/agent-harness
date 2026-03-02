@@ -256,17 +256,22 @@ export function createInitialState(params: {
   system: SystemMessage;
   user: UserMessage;
   toolDefinitions: ToolDefinition[];
+  initialMessages?: Array<UserMessage | AssistantMessage>;
 }): AgentState {
-  const { task, config, system, user, toolDefinitions } = params;
+  const { task, config, system, user, toolDefinitions, initialMessages } = params;
   const now = nowUtil();
   const runId = generateRunId();
+  const messages =
+    initialMessages !== undefined && initialMessages.length > 0
+      ? [system, ...initialMessages]
+      : [system, user];
 
   return {
     runId,
     task,
     config,
     status: 'idle',
-    messages: [system, user],
+    messages,
     steps: [],
     totalToolCalls: 0,
     availableTools: toolDefinitions.map((t) => t.name),

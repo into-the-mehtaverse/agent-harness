@@ -1,6 +1,12 @@
 // src/tools/factory/addNumbers.ts
 
+import { z } from 'zod';
 import type { Tool, ToolContext } from '../types';
+
+const addNumbersArgsSchema = z.object({
+  a: z.number().describe('First addend.'),
+  b: z.number().describe('Second addend.'),
+});
 
 /**
  * Adds two numbers and returns the sum.
@@ -25,13 +31,9 @@ export const addNumbersTool: Tool = {
       additionalProperties: false,
     },
   },
+  argsSchema: addNumbersArgsSchema,
   async handler(args: unknown, ctx: ToolContext) {
-    const { a, b } = (args ?? {}) as { a?: unknown; b?: unknown };
-
-    if (typeof a !== 'number' || typeof b !== 'number') {
-      throw new Error('add_numbers: "a" and "b" must both be numbers');
-    }
-
+    const { a, b } = args as { a: number; b: number };
     const sum = a + b;
     ctx.log?.('add_numbers tool invoked', { a, b, sum });
     return { a, b, sum };
