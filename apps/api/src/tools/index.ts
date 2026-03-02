@@ -3,7 +3,7 @@
 import type { Tool, ToolDefinition, ToolContext, ToolInvocation, ToolResult, ToolError } from './types';
 import type { ToolExecutor } from './executor';
 import { toErrorMessage } from '../utils/error';
-import { getBasicTools } from './basicTools';
+import { getBasicTools } from './factory';
 
 /**
  * Return the default set of tools for the harness.
